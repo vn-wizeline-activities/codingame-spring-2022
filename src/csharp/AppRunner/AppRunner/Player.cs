@@ -22,8 +22,11 @@ class Player
         IThreatAnalyzer threatAnalyzer = new DefaultThreatAnalyzer();
 
         string[] inputs;
-        var baseCamp = BaseCampInitializer.Init(gameInput);
+        var myBaseCamp = BaseCampInitializer.Init(gameInput);
+        BaseCamp.MyBaseCamp = myBaseCamp;
+        BaseCamp.OpponentBaseCamp = myBaseCamp.Location.Equals(Position.TopLeft) ? new BaseCamp(Position.BottomRight) : new BaseCamp(Position.TopLeft);
 
+        Logger.LogDebug($"Base Camp: {myBaseCamp.Location}");
         // heroesPerPlayer: Always 3
         int heroesPerPlayer = int.Parse(gameInput.GetInput());
 
@@ -34,26 +37,33 @@ class Player
             inputs = gameInput.GetInput().Split(' ');
             int myHealth = int.Parse(inputs[0]); // Your base health
             int myMana = int.Parse(inputs[1]); // Ignore in the first league; Spend ten mana to cast a spell
-            baseCamp.UpdateHP(myHealth).UpdateMana(myMana);
+            myBaseCamp.UpdateHP(myHealth).UpdateMana(myMana);
+            
 
             inputs = gameInput.GetInput().Split(' ');
             int oppHealth = int.Parse(inputs[0]);
             int oppMana = int.Parse(inputs[1]);
+            BaseCamp.OpponentBaseCamp.UpdateHP(oppHealth).UpdateMana(oppMana);
 
             int entityCount = int.Parse(gameInput.GetInput()); // Amount of heros and monsters you can see
             var entityManager = new EntityManager(entityCount, gameInput);
-            entityManager.Init(baseCamp);
+            entityManager.Init(myBaseCamp);
 
             List<Hero> myHeroes = entityManager.MyHeroes;
             List<Hero> oppHeroes = entityManager.OpponentHeroes;
             List<Monster> monsters = entityManager.Monsters;
-            var threatAnalysisResult = threatAnalyzer.Analyze(baseCamp, entityManager);
+            var threatAnalysisResult = threatAnalyzer.Analyze(myBaseCamp, entityManager);
 
+            // Set roles for heroes
+            myHeroes[0].IsDefensiveHero = true;
+
+            IActionStrategy offensiveStrategy = new OffensiveActionStrategy(threatAnalysisResult, myBaseCamp, entityManager);
+            IActionStrategy defensiveStrategy = new DefensiveActionStrategy(threatAnalysisResult, myBaseCamp, entityManager);
             for (int i = 0; i < heroesPerPlayer; i++)
             {
-                //var strategy = new DefaultActionStrategy(baseCamp, entityManager, i);
-                var strategy = new ThreatAnalysisActionStrategy(threatAnalysisResult, baseCamp, entityManager);
-                myHeroes[i].Action(strategy);
+                var hero = myHeroes[i];
+                IActionStrategy strategy = hero.IsDefensiveHero ? defensiveStrategy : offensiveStrategy;
+                hero.Action(strategy);
             }
 
         }
@@ -65,12 +75,22 @@ class Player
 
 public sealed class Constants
 {
-    public const int SafeDistance = 5000;
+    public const int DefenseDistance = 5000;
+    public const int DangerousDistance = 1500;
     public const int CastMana = 10;
     public const int ManaRestoredPerHit = 1;
-
     public const int WindEffectZone = 1280;
-    public static Position DefensivePosition = new Position(1500, 1500);
+    public const int HighHP = 100;
+
+    // Hero
+    public const int HeroAttackZone = 800;
+    public const int HeroMaxMoving = 800;
+    public const int HeroAttackDmg = 2;
+    public const int SpellWindRange = 1280;
+    public const int SpellControlRange = 2200;
+    public const int SpellShieldRange = 2200;
+
+
 }
 
 public interface IGameInput
@@ -90,7 +110,7 @@ public class TextFileInput : IGameInput
 {
     public TextFileInput(string textFile)
     {
-        
+
     }
     public string GetInput()
     {
@@ -117,16 +137,17 @@ public static class Logger
     }
 }
 
+#region Action strategies
 
 public interface IActionStrategy
 {
     void DoAction(Hero hero);
 }
 
-public class ThreatAnalysisActionStrategy : IActionStrategy
+public abstract class ThreatAnalysisActionStrategy : IActionStrategy
 {
-    private readonly BaseCamp baseCamp;
-    private readonly EntityManager entityManager;
+    protected readonly BaseCamp baseCamp;
+    protected readonly EntityManager entityManager;
 
     public ThreatAnalysisActionStrategy(ThreatAnalysisResult analysisResult, BaseCamp baseCamp, EntityManager entityManager)
     {
@@ -134,16 +155,60 @@ public class ThreatAnalysisActionStrategy : IActionStrategy
         this.baseCamp = baseCamp;
         this.entityManager = entityManager;
 
-        entityManager.MyHeroes[0].IsDefensiveHero = true;
     }
 
     public ThreatAnalysisResult AnalysisResult { get; }
 
-    public void DoAction(Hero hero)
+    public abstract void DoAction(Hero hero);
+}
+
+public class DefensiveActionStrategy : ThreatAnalysisActionStrategy
+{
+    public DefensiveActionStrategy(ThreatAnalysisResult analysisResult, BaseCamp baseCamp, EntityManager entityManager) : base(analysisResult, baseCamp, entityManager)
+    {
+    }
+
+    public override void DoAction(Hero hero)
     {
         var target = AnalysisResult.ThreatCollection.FirstOrDefault();
         Random random = new Random();
-        if (target != null && (!hero.IsDefensiveHero || target.Monster.NextPosition().CalculateDistance(baseCamp.Location) <= Constants.SafeDistance))
+        if (target != null && target.Monster.DistanceToMyBaseCampNextPosition() <= Constants.DefenseDistance)
+        {
+
+            if (hero.CanSpellWind(entityManager.Monsters))
+            {
+                target.HandleThreat(_ => hero.SpellWind());
+            }
+            else
+            {
+                target.HandleThreat(hero.AttackMonster);
+            }
+
+            // Enough heroes go to next target
+            if (target.RequiredHeroes == target.NoOfHeroes)
+            {
+                AnalysisResult.ThreatCollection.Remove(target);
+            }
+        }
+        else
+        {
+            Logger.LogDebug($"Move to defense position: {baseCamp.DefensivePosition}");
+            hero.Move(baseCamp.DefensivePosition);
+        }
+    }
+}
+
+public class OffensiveActionStrategy : ThreatAnalysisActionStrategy
+{
+    public OffensiveActionStrategy(ThreatAnalysisResult analysisResult, BaseCamp baseCamp, EntityManager entityManager) : base(analysisResult, baseCamp, entityManager)
+    {
+    }
+
+    public override void DoAction(Hero hero)
+    {
+        var target = AnalysisResult.ThreatCollection.FirstOrDefault();
+        Random random = new Random();
+        if (target != null)
         {
             if (hero.CanSpellWind(entityManager.Monsters))
             {
@@ -162,75 +227,22 @@ public class ThreatAnalysisActionStrategy : IActionStrategy
         }
         else
         {
-            // If there is no hero in safe zone need return, otherwise wait
-            if (entityManager.MyHeroes.Any(x => x != hero && x.SpeedVector.X < 0 && x.CurrentPosition.CalculateDistance(baseCamp.Location) < Constants.SafeDistance))
+            var newPosition = new Position(hero.CurrentPosition.X + baseCamp.OffensiveDirection(random.Next(800)), hero.CurrentPosition.Y + baseCamp.OffensiveDirection(random.Next(800)));
+
+            if (hero.DistanceToMyBaseCamp() < 10000)
             {
-                var newPosition = new Position(hero.CurrentPosition.X + random.Next(800), hero.CurrentPosition.Y + random.Next(800));
-                if (hero.CurrentPosition.CalculateDistance(baseCamp.Location) < 10000)
-                {
-                    if (hero.IsDefensiveHero && newPosition.CalculateDistance(baseCamp.Location) > Constants.SafeDistance)
-                    {
-                        hero.Wait();
-                    }
-                    else
-                    {
-                        hero.Move(newPosition);
-                    }
-                    
-                }
-                else
-                {
-                    hero.Wait();
-                }
+                hero.Move(newPosition);
             }
             else
             {
-                hero.Move(1500, 1500);
+                hero.Wait();
             }
-           
+
         }
     }
 }
 
-public class DefaultActionStrategy : IActionStrategy
-{
-    protected EntityManager entityManager;
-    protected BaseCamp baseCamp;
-    protected int heroIndex;
-    public DefaultActionStrategy(BaseCamp baseCamp, EntityManager entityManager, int heroIndex)
-    {
-        this.entityManager = entityManager;
-        this.baseCamp = baseCamp;
-        this.heroIndex = heroIndex;
-    }
-
-    public virtual void DoAction(Hero hero)
-    {
-        Monster target = null;
-        var monsters = entityManager.Monsters.Where(m => m.DistanceTo(baseCamp) < 5000).ToList();
-        var ourThreat = monsters.Where(x => x.IsOurThreat).ToList();
-
-
-        if (ourThreat.Count > 0)
-        {
-            target = ourThreat[heroIndex % monsters.Count];
-        }
-
-        if (target == null && monsters.Any())
-        {
-            target = monsters[heroIndex % monsters.Count];
-        }
-
-        if (target != null)
-        {
-            hero.AttackMonster(target);
-        }
-        else
-        {
-            hero.Wait();
-        }
-    }
-}
+#endregion
 
 #region Entities
 
@@ -314,11 +326,11 @@ public class Entity
     public int ShieldLife { get; }
     public int IsControlled { get; }
     public int Health { get; }
-    public Position SpeedVector { get; }
+    public Velocity SpeedVector { get; }
     public int NearBase { get; }
     public int ThreatFor { get; }
 
-  
+
 
     public Entity(int id, int type, int x, int y, int shieldLife, int isControlled, int health, int vx, int vy, int nearBase, int threatFor)
     {
@@ -328,25 +340,22 @@ public class Entity
         this.ShieldLife = shieldLife;
         this.IsControlled = isControlled;
         this.Health = health;
-        this.SpeedVector = new Position(vx, vy);
+        this.SpeedVector = new Velocity(vx, vy);
         this.NearBase = nearBase;
         this.ThreatFor = threatFor;
     }
 
-    public int DistanceTo(Entity entity)
+    public int DistanceTo(Entity entity, bool nextTurn = false)
     {
-        return this.CurrentPosition.CalculateDistance(entity.CurrentPosition);
+        return this.CurrentPosition.CalculateDistance(nextTurn ? entity.NextPosition() : entity.CurrentPosition);
     }
+
 
     public Position NextPosition()
     {
         return new Position(this.CurrentPosition.X + SpeedVector.X, this.CurrentPosition.Y + SpeedVector.Y);
     }
 
-    public int DistanceTo(BaseCamp baseCamp)
-    {
-        return this.CurrentPosition.CalculateDistance(baseCamp.Location);
-    }
 }
 
 
@@ -374,7 +383,7 @@ public class Hero : Entity
     public void AttackMonster(Monster monster)
     {
         mana.IncreaseMana();
-        Move(monster.CurrentPosition.X, monster.CurrentPosition.Y);
+        Move(monster.CurrentPosition.X, monster.CurrentPosition.Y, "Attack Monster");
     }
 
     public void Wait()
@@ -382,25 +391,33 @@ public class Hero : Entity
         Console.WriteLine("WAIT");
     }
 
-    public void Move(int x, int y)
+    public void Move(int x, int y, string comment = null)
     {
         CurrentPosition.UpdatePosition(x, y);
-        Console.WriteLine($"MOVE {x} {y}");
-    }
-
-    public void SpellWind(Monster monster)
-    {
-        mana.DecreaseMana(CastMana);
-        CurrentPosition.UpdatePosition(monster.CurrentPosition.X, monster.CurrentPosition.Y);
-        Console.WriteLine($"SPELL WIND {monster.CurrentPosition.X} {monster.CurrentPosition.Y}");
+        Console.WriteLine($"MOVE {x} {y} #{comment ?? "<comment>"}");
     }
 
     public void SpellWind()
     {
         mana.DecreaseMana(CastMana);
-        int x = CurrentPosition.X + SpeedVector.X > 0 ? CurrentPosition.X + 1000 : 0;
-        int y = CurrentPosition.Y + SpeedVector.X > 0 ? CurrentPosition.Y + 1000 : 0;
-        Console.WriteLine($"SPELL WIND {x} {y}");
+        int x = CurrentPosition.X + BaseCamp.OffensiveDirection(SpeedVector.X) > 0 ? CurrentPosition.X + BaseCamp.OffensiveDirection(1000) : 0;
+        int y = CurrentPosition.Y + BaseCamp.OffensiveDirection(SpeedVector.X) > 0 ? CurrentPosition.Y + BaseCamp.OffensiveDirection(1000) : 0;
+        string spellCommand = $"SPELL WIND {x} {y}";
+        Console.WriteLine(spellCommand);
+    }
+
+    public void SpellControl(Entity controlledEntity, Position newPosition)
+    {
+        string spellCommand = $"SPELL CONTROL {controlledEntity.Id} {newPosition.X} {newPosition.Y}";
+        Logger.LogDebug(spellCommand);
+        Console.WriteLine(spellCommand);
+    }
+
+    public void SpellShield(Entity protectedEntity)
+    {
+        string spellCommand = $"SPELL SHIELD {protectedEntity.Id}";
+        Logger.LogDebug(spellCommand);
+        Console.WriteLine(spellCommand);
     }
 
     public void Move(Position pos)
@@ -463,12 +480,11 @@ public class ThreatCollection : List<Threat>
 
 public class DefaultThreatAnalyzer : IThreatAnalyzer
 {
-    const int NearBaseCamp = 500;
-    const int HighHP = 300;
-    const int CurrentThreat = 500;
-    const int IntendThreat = 200;
-    const int NearBaseCampDistance = 8000;
-    private int maximumThreat = NearBaseCamp + HighHP + CurrentThreat + IntendThreat;
+    const int W_NearBaseCamp = 500;
+    const int W_HighHP = 300;
+    const int W_CurrentThreat = 500;
+    const int W_IntendThreat = 200;
+    private int maximumThreat = W_NearBaseCamp + W_HighHP + W_CurrentThreat + W_IntendThreat;
 
     public ThreatAnalysisResult Analyze(BaseCamp baseCamp, EntityManager entityManager)
     {
@@ -477,25 +493,24 @@ public class DefaultThreatAnalyzer : IThreatAnalyzer
         foreach (var monster in entityManager.Monsters)
         {
             var threat = new Threat(monster, 0);
-            if (monster.DistanceTo(baseCamp) < Constants.SafeDistance)
+            if (monster.DistanceToMyBaseCamp() < Constants.DefenseDistance)
             {
-                threat.Weight += NearBaseCamp;
+                threat.Weight += W_NearBaseCamp;
             }
 
-            if (monster.Health > 100)
+            if (monster.Health > Constants.HighHP)
             {
-                threat.Weight += HighHP;
+                threat.Weight += W_HighHP;
             }
 
             if (monster.IsOurThreat)
             {
-                threat.Weight += CurrentThreat;
+                threat.Weight += W_CurrentThreat;
             }
 
-            if (monster.SpeedVector.X < monster.CurrentPosition.X
-                && monster.SpeedVector.Y < monster.CurrentPosition.Y)
+            if (monster.DistanceToMyBaseCamp() < monster.DistanceToMyBaseCampNextPosition())
             {
-                threat.Weight += IntendThreat;
+                threat.Weight += W_IntendThreat;
             }
 
             threat.RequiredHeroes = CalculateRequiredHeroes(threat);
@@ -514,7 +529,7 @@ public class DefaultThreatAnalyzer : IThreatAnalyzer
         {
             return 3;
         }
-        if (weight >= CurrentThreat + NearBaseCamp)
+        if (weight >= W_CurrentThreat + W_NearBaseCamp)
         {
             return 2;
         }
@@ -550,14 +565,28 @@ public class Threat
 
 public class BaseCamp
 {
+    private const int DefensiveDistance = 1500;
+
     public Position Location { get; }
     public Mana Mana { get; private set; }
     public int HP { get; private set; }
+    public BaseCamp(Position location) : this(location.X, location.Y)
+    {
 
+    }
     public BaseCamp(int x, int y)
     {
         this.Location = new Position(x, y);
         this.Mana = new Mana(0);
+
+        if (Location.Equals(Position.TopLeft))
+        {
+            DefensivePosition = new Position(DefensiveDistance, DefensiveDistance);
+        }
+        else
+        {
+            DefensivePosition = new Position(Location.X - DefensiveDistance, Location.Y - DefensiveDistance);
+        }
     }
 
     public BaseCamp UpdateHP(int hp)
@@ -571,6 +600,32 @@ public class BaseCamp
         this.Mana.Value = mana;
         return this;
     }
+
+    public int OffensiveDirection(int value)
+    {
+        int newValue = value;
+        if (Location.Equals(Position.BottomRight))
+        {
+            newValue = value * (-1);
+        }
+
+        Logger.LogDebug($"New value: {newValue}");
+        return newValue;
+    }
+
+    public Position DefensivePosition { get; }
+
+    /// <summary>
+    /// My base camp
+    /// </summary>
+    /// <remarks> The value will be set at init game </remarks>
+    public static BaseCamp MyBaseCamp { get; set; }
+
+    /// <summary>
+    /// My opponent camp
+    /// </summary>
+    /// <remarks> The value will be set at init game </remarks>
+    public static BaseCamp OpponentBaseCamp { get; set; }
 }
 
 public class Mana
@@ -598,17 +653,36 @@ public sealed class BaseCampInitializer
     {
         string[] inputs;
         inputs = gameInput.GetInput().Split(' ');
-
         // base_x,base_y: The corner of the map representing your base
         int baseX = int.Parse(inputs[0]);
         int baseY = int.Parse(inputs[1]);
 
         return new BaseCamp(baseX, baseY);
     }
-} 
+}
 #endregion
 
-public class Position
+#region Others
+
+
+public class Velocity
+{
+    public Velocity(int x, int y)
+    {
+        X = x;
+        Y = y;
+    }
+
+    public int X { get; }
+    public int Y { get; }
+
+    public override string ToString()
+    {
+        return $"X={X}, Y={Y}";
+    }
+}
+
+public class Position : IEquatable<Position>
 {
     public int X { get; private set; }
     public int Y { get; private set; }
@@ -641,4 +715,42 @@ public class Position
     {
         return $"X={X}, Y={Y}";
     }
+
+    public bool Equals(Position? other)
+    {
+        if (other == null)
+            return false;
+
+        return X == other.X && Y == other.Y;
+    }
+
+    public override int GetHashCode()
+    {
+        return $"{X}, {Y}".GetHashCode();
+    }
+
+
+    public static Position TopLeft => new Position(0, 0);
+    public static Position BottomRight => new Position(17630, 9000);
+
+
 }
+#endregion
+
+
+#region Extensions
+
+public static class EntityExtenstions
+{
+    public static int DistanceToMyBaseCamp(this Entity entity)
+    {
+        return entity.CurrentPosition.CalculateDistance(BaseCamp.MyBaseCamp.Location);
+    }
+
+    public static int DistanceToMyBaseCampNextPosition(this Entity entity)
+    {
+        return entity.NextPosition().CalculateDistance(BaseCamp.MyBaseCamp.Location);
+    }
+}
+
+#endregion
