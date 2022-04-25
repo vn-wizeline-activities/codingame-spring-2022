@@ -56,7 +56,7 @@ class Player
 
             // Set roles for heroes
             myHeroes[0].IsDefensiveHero = true;
-            myHeroes[1].IsAttackOpponentBaseCamp = true;
+            //myHeroes[1].IsAttackOpponentBaseCamp = true;
 
             IActionStrategy offensiveStrategy = new OffensiveActionStrategy(threatAnalysisResult, myBaseCamp, entityManager);
             IActionStrategy defensiveStrategy = new DefensiveActionStrategy(threatAnalysisResult, myBaseCamp, entityManager);
@@ -92,11 +92,11 @@ class Player
 public sealed class Constants
 {
     public const int DefenseDistance = 5000;
-    public const int DangerousDistance = 1500;
+    public const int DangerousDistance = 2500;
     public const int CastMana = 10;
     public const int ManaRestoredPerHit = 1;
     public const int WindEffectZone = 1280;
-    public const int HighHP = 100;
+    public const int HighHP = 15;
 
     // Hero
     public const int HeroAttackZone = 800;
@@ -190,10 +190,11 @@ public class DefensiveActionStrategy : ThreatAnalysisActionStrategy
         Random random = new Random();
         if (target != null && target.Monster.DistanceToMyBaseCampNextPosition() <= Constants.DefenseDistance)
         {
+            Logger.LogDebug($"Defense: {target}");
             var enemies = entityManager.Monsters.Cast<Entity>().Concat(entityManager.OpponentHeroes);
             if (hero.CanSpellWind(enemies) && target.Monster.DistanceToMyBaseCamp() <= Constants.DangerousDistance)
             {
-                hero.SpellWind();
+                target.HandleThreat(_ => hero.SpellWind());
             }
             else
             {
@@ -230,14 +231,24 @@ public class OffensiveActionStrategy : ThreatAnalysisActionStrategy
 
     public override void DoAction(Hero hero)
     {
-        var target = AnalysisResult.ThreatCollection.FirstOrDefault();
+        var target = AnalysisResult.ThreatCollection.Where(x => x.RequiredHeroes > x.NoOfHeroes).FirstOrDefault();
         Random random = new Random();
         if (target != null)
         {
+            Logger.LogDebug($"Offensive: {target}");
             var enemies = entityManager.Monsters.Cast<Entity>().Concat(entityManager.OpponentHeroes);
             if (hero.CanSpellWind(enemies) && (baseCamp.Mana.Value > 50 || target.RequiredHeroes > 1))
             {
                 hero.SpellWind();
+                target.HandleThreat(_ => { });
+            }
+            else if (hero.CanSpellControl(entityManager.Monsters, out Entity enemy) 
+                && (baseCamp.Mana.Value > 19 || target.RequiredHeroes > 1)
+                && enemy.DistanceToOpponentBaseCamp() > hero.DistanceToOpponentBaseCamp()
+                && enemy.IsControlled == 0)
+            {
+                hero.SpellControl(enemy, BaseCamp.OpponentBaseCamp.Location);
+                target.HandleThreat(_ => { });
             }
             else
             {
@@ -385,7 +396,7 @@ public class Entity
     public int Type { get; }
     public Position CurrentPosition { get; }
     public int ShieldLife { get; }
-    public int IsControlled { get; }
+    public int IsControlled { get; set; }
     public int Health { get; }
     public Velocity SpeedVector { get; }
     public int NearBase { get; }
@@ -417,6 +428,10 @@ public class Entity
         return new Position(this.CurrentPosition.X + SpeedVector.X, this.CurrentPosition.Y + SpeedVector.Y);
     }
 
+    public override string ToString()
+    {
+        return $"Type: {this.GetType().Name}, Id: {Id}, NearBase: {NearBase}, Threat: {ThreatFor}, Position: {CurrentPosition}, Speed: {SpeedVector}, Health: {Health}, Shield: {ShieldLife}, Control: {IsControlled}";
+    }
 }
 
 
@@ -490,6 +505,7 @@ public class Hero : Entity
 
     public void SpellControl(Entity controlledEntity, Position newPosition)
     {
+        controlledEntity.IsControlled = 1;
         string spellCommand = $"SPELL CONTROL {controlledEntity.Id} {newPosition.X} {newPosition.Y}";
         Logger.LogDebug(spellCommand);
         Console.WriteLine(spellCommand);
@@ -509,10 +525,27 @@ public class Hero : Entity
 
     public bool CanSpellWind(IEnumerable<Entity> enemies)
     {
-        var nearbyMonsters = enemies.Count(x => x.CurrentPosition.CalculateDistance(this.CurrentPosition) < Constants.WindEffectZone);
+        int nearbyMonsters = FindNearByEnemies(enemies, Constants.SpellWindRange).Count();
 
         Logger.LogDebug($"Current Position: {CurrentPosition} - Next: {SpeedVector}");
         if (mana.Value >= CastMana && nearbyMonsters > 0)
+        {
+            return true;
+        }
+
+        return false;
+    }
+
+    private IEnumerable<Entity> FindNearByEnemies(IEnumerable<Entity> enemies, int effectRange)
+    {
+        return enemies.Where(x => x.CurrentPosition.CalculateDistance(this.CurrentPosition) <= effectRange);
+    }
+
+    public bool CanSpellControl(IEnumerable<Entity> enemies, out Entity enemy)
+    {
+        enemy = FindNearByEnemies(enemies, Constants.SpellWindRange).FirstOrDefault();
+
+        if (mana.Value >= CastMana && enemy != null)
         {
             return true;
         }
@@ -565,10 +598,11 @@ public class ThreatCollection : List<Threat>
 public class DefaultThreatAnalyzer : IThreatAnalyzer
 {
     const int W_NearBaseCamp = 500;
+    const int W_DangerousZone = 700;
     const int W_HighHP = 300;
     const int W_CurrentThreat = 500;
     const int W_IntendThreat = 200;
-    private int maximumThreat = W_NearBaseCamp + W_HighHP + W_CurrentThreat + W_IntendThreat;
+    private int maximumThreat = W_NearBaseCamp + W_HighHP + W_CurrentThreat + W_IntendThreat + W_DangerousZone;
 
     public ThreatAnalysisResult Analyze(BaseCamp baseCamp, EntityManager entityManager)
     {
@@ -581,6 +615,13 @@ public class DefaultThreatAnalyzer : IThreatAnalyzer
             {
                 threat.Weight += W_NearBaseCamp;
             }
+
+            if (monster.DistanceToMyBaseCamp() < Constants.DangerousDistance)
+            {
+                threat.Weight += W_DangerousZone;
+                threat.Weight += Constants.DangerousDistance - monster.DistanceToMyBaseCamp();
+            }
+
 
             if (monster.Health > Constants.HighHP)
             {
@@ -609,9 +650,9 @@ public class DefaultThreatAnalyzer : IThreatAnalyzer
     public int CalculateRequiredHeroes(Threat threat)
     {
         var weight = threat.Weight;
-        if (weight == maximumThreat)
+        if (weight >= W_DangerousZone + W_CurrentThreat + W_NearBaseCamp)
         {
-            return 2;
+            return 3;
         }
         if (weight >= W_CurrentThreat + W_NearBaseCamp)
         {
@@ -641,6 +682,11 @@ public class Threat
     {
         NoOfHeroes++;
         action.Invoke(this.Monster);
+    }
+
+    public override string ToString()
+    {
+        return $"Threat level: {Weight}, Required: {RequiredHeroes}, Handled: {NoOfHeroes}, Target: {Monster}";
     }
 }
 #endregion
@@ -780,6 +826,11 @@ public class Position : IEquatable<Position>
     {
         X = x;
         Y = y;
+    }
+
+    public Position Move(int x, int y)
+    {
+        return new Position(X + x, Y + y);
     }
 
     public int CalculateDistance(Position toPosition)
