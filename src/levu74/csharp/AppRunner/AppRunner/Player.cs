@@ -65,6 +65,7 @@ class Player
                 IActionStrategy defensiveStrategy = new ExtremeDefensiveActionStrategy(threatAnalysisResult, myBaseCamp, entityManager);
                 IActionStrategy defensePointStrategy = new DefensePointActionStrategy();
                 IActionStrategy attackOpponentStrategy = new AttackOpponentBaseCampActionStrategy(threatAnalysisResult, myBaseCamp, entityManager);
+                
                 IActionStrategy attackPoint1Strategy = new AttackOpponentPointActionStrategy(Position.AttackPoint3, castControl: false);
                 IActionStrategy attackPoint2Strategy = new AttackOpponentPointActionStrategy(Position.AttackPoint3, castControl: true);
 
@@ -102,6 +103,7 @@ public sealed class Constants
     public const int ManaRestoredPerHit = 1;
     public const int WindEffectZone = 1280;
     public const int HighHP = 15;
+    public const int ShieldLife = 12;
 
     // Hero
     public const int HeroAttackZone = 800;
@@ -418,6 +420,10 @@ public class AttackOpponentPointActionStrategy : IActionStrategy
     {
         this.attackPoint = attackPoint; // BaseCamp.MyBaseCamp.Equals(Position.TopLeft) ? Position.AttackPoint1Top : Position.AttackPoint1Bottom;
         CastControl = castControl;
+        if (GameState.CurrentRoundState.OpponentHeroes.All(x => x.DistanceToEnemyBase() > Constants.DefenseDistance && x.DistanceToEnemyBase() > attackPoint.CalculateDistance(BaseCamp.OpponentBaseCamp.Location)))
+        {
+            this.attackPoint = attackPoint.Move(-BaseCamp.MyBaseCamp.OffensiveDirection(Randomize.RandomRange(100, 1000)), -BaseCamp.MyBaseCamp.OffensiveDirection(Randomize.RandomRange(100, 1000)));
+        }
     }
     public void DoAction(Hero hero)
     {
@@ -549,7 +555,7 @@ public class Entity
     public int Id { get; }
     public int Type { get; }
     public Position CurrentPosition { get; }
-    public int ShieldLife { get; }
+    public int ShieldLife { get; set; }
     public int IsControlled { get; set; }
     public int Health { get; }
     public Velocity SpeedVector { get; }
@@ -690,6 +696,7 @@ public class Hero : Entity
 
     public void SpellShield(Entity protectedEntity, string comment = "")
     {
+        protectedEntity.ShieldLife = protectedEntity.ShieldLife == 0 ? Constants.ShieldLife : protectedEntity.ShieldLife;
         string spellCommand = $"SPELL SHIELD {protectedEntity.Id} {comment}";
         Logger.LogDebug(spellCommand);
         Console.WriteLine(spellCommand);
