@@ -65,8 +65,8 @@ class Player
                 IActionStrategy defensiveStrategy = new ExtremeDefensiveActionStrategy(threatAnalysisResult, myBaseCamp, entityManager);
                 IActionStrategy defensePointStrategy = new DefensePointActionStrategy();
                 IActionStrategy attackOpponentStrategy = new AttackOpponentBaseCampActionStrategy(threatAnalysisResult, myBaseCamp, entityManager);
-                IActionStrategy attackPoint1Strategy = new AttackOpponentPointActionStrategy(Position.AttackPoint1, castControl: false);
-                IActionStrategy attackPoint2Strategy = new AttackOpponentPointActionStrategy(Position.AttackPoint2, castControl: true);
+                IActionStrategy attackPoint1Strategy = new AttackOpponentPointActionStrategy(Position.AttackPoint3, castControl: false);
+                IActionStrategy attackPoint2Strategy = new AttackOpponentPointActionStrategy(Position.AttackPoint3, castControl: true);
 
 
 
@@ -421,8 +421,8 @@ public class AttackOpponentPointActionStrategy : IActionStrategy
     }
     public void DoAction(Hero hero)
     {
-        var opponentHeroes = GameState.CurrentRoundState.OpponentHeroes.Where(x => x.DistanceToOpponentBaseCamp() > Constants.DefenseDistance);
-        if (CastControl && hero.CanSpellControl(opponentHeroes, out Entity target) && GameState.MyBaseCamp.Mana.Value > 0 && GameState.MyBaseCamp.Mana.Value % 10 == 0)
+        var opponentHeroes = GameState.CurrentRoundState.OpponentHeroes.Where(x => x.DistanceToOpponentBaseCamp() < Constants.DefenseDistance);
+        if (CastControl && hero.CanSpellControl(opponentHeroes, out Entity target) && GameState.MyBaseCamp.Mana.Value > 0 && GameState.MyBaseCamp.Mana.Value % 6 == 0)
         {
             hero.SpellControl(target, BaseCamp.MyBaseCamp.Location);
             return;
@@ -434,7 +434,8 @@ public class AttackOpponentPointActionStrategy : IActionStrategy
             if (distanceToEnemyCamp <= Constants.DefenseDistance
                 && monster.ThreatFor == 2
                 && monster.ShieldLife == 0
-                && hero.CanSpellShield(new[] { monster }, out Entity shieldTarget) && GameState.MyBaseCamp.Mana.Value % 2 == 1 && GameState.MyBaseCamp.Mana.Value > 20)
+                && monster.Health >= 13
+                && hero.CanSpellShield(new[] { monster }, out Entity shieldTarget) && GameState.MyBaseCamp.Mana.Value % 4 == 1 && GameState.MyBaseCamp.Mana.Value > 20)
             {
                 hero.SpellShield(shieldTarget);
                 return;
@@ -444,15 +445,24 @@ public class AttackOpponentPointActionStrategy : IActionStrategy
             {
                 if (hero.CanSpellWind(new[] { monster }) && GameState.MyBaseCamp.Mana.Value > DefenseReserveMana)
                 {
+                    Logger.LogDebug($"Distance spell wind: {hero.DistanceTo(monster)}");
                     hero.SpellWind(BaseCamp.OpponentBaseCamp.Location);
                     return;
                 }
 
-                if (monster.IsOurThreat || GameState.MyBaseCamp.Mana.Value < DefenseReserveMana)
+                if (GameState.MyBaseCamp.Mana.Value > DefenseReserveMana && hero.CanSpellControl(new[] { monster}, out target))
+                {
+                    hero.SpellControl(target, BaseCamp.OpponentBaseCamp.Location);
+                    return;
+                }
+
+                if ((monster.IsOurThreat  || (GameState.MyBaseCamp.Mana.Value < DefenseReserveMana && distanceToEnemyCamp > 2500)) && monster.ShieldLife == 0 && monster.IsControlled == 0)
                 {
                     hero.AttackMonster(monster);
                     return;
                 }
+
+                
             }
 
         }
@@ -567,6 +577,7 @@ public class Entity
     }
 
     public int DistanceToEnemyBase() => this.CurrentPosition.CalculateDistance(BaseCamp.OpponentBaseCamp.Location);
+    public int DistanceToEnemyBaseNextMove() => this.NextPosition().CalculateDistance(BaseCamp.OpponentBaseCamp.Location);
     public int DistanceToMyBase() => this.CurrentPosition.CalculateDistance(BaseCamp.MyBaseCamp.Location);
 
 
@@ -708,7 +719,8 @@ public class Hero : Entity
 
     public bool CanSpellControl(IEnumerable<Entity> enemies, out Entity enemy)
     {
-        enemy = FindNearByEnemies(enemies, Constants.SpellControlRange).Where(x=>x.ShieldLife == 0).FirstOrDefault();
+        enemy = FindNearByEnemies(enemies, Constants.SpellControlRange)
+            .Where(x=>x.ShieldLife == 0 && (x.IsControlled == 0 || x.DistanceToEnemyBase() < x.DistanceToEnemyBaseNextMove() )).FirstOrDefault();
 
         if (mana.Value >= CastMana && enemy != null)
         {
@@ -1057,6 +1069,7 @@ public class Position : IEquatable<Position>
 
     public static Position AttackPoint1 => BaseCamp.MyBaseCamp.Location.Equals(Position.TopLeft) ? Position.AttackPoint1Top : Position.AttackPoint1Bottom;
     public static Position AttackPoint2 => BaseCamp.MyBaseCamp.Location.Equals(Position.TopLeft) ? Position.AttackPoint2Top : Position.AttackPoint2Bottom;
+    public static Position AttackPoint3 => BaseCamp.MyBaseCamp.Location.Equals(Position.TopLeft) ? new Position(14200, 6000) : new Position(3200, 2700);
 }
 #endregion
 
