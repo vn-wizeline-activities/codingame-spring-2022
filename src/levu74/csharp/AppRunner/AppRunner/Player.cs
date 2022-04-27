@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Linq;
 using System.IO;
 using System.Text;
@@ -30,56 +30,61 @@ class Player
         // heroesPerPlayer: Always 3
         int heroesPerPlayer = int.Parse(gameInput.GetInput());
 
+        GameState.MyBaseCamp = myBaseCamp;
+        GameState.OpponentBaseCamp = BaseCamp.OpponentBaseCamp;
+
         // game loop
         while (true)
         {
-
-            inputs = gameInput.GetInput().Split(' ');
-            int myHealth = int.Parse(inputs[0]); // Your base health
-            int myMana = int.Parse(inputs[1]); // Ignore in the first league; Spend ten mana to cast a spell
-            myBaseCamp.UpdateHP(myHealth).UpdateMana(myMana);
-
-
-            inputs = gameInput.GetInput().Split(' ');
-            int oppHealth = int.Parse(inputs[0]);
-            int oppMana = int.Parse(inputs[1]);
-            BaseCamp.OpponentBaseCamp.UpdateHP(oppHealth).UpdateMana(oppMana);
-
-            int entityCount = int.Parse(gameInput.GetInput()); // Amount of heros and monsters you can see
-            var entityManager = new EntityManager(entityCount, gameInput);
-            entityManager.Init(myBaseCamp);
-
-            List<Hero> myHeroes = entityManager.MyHeroes;
-            List<Hero> oppHeroes = entityManager.OpponentHeroes;
-            List<Monster> monsters = entityManager.Monsters;
-            var threatAnalysisResult = threatAnalyzer.Analyze(myBaseCamp, entityManager);
-
-            // Set roles for heroes
-            myHeroes[0].IsDefensiveHero = true;
-            //myHeroes[1].IsAttackOpponentBaseCamp = true;
-
-            IActionStrategy offensiveStrategy = new OffensiveActionStrategy(threatAnalysisResult, myBaseCamp, entityManager);
-            IActionStrategy defensiveStrategy = new DefensiveActionStrategy(threatAnalysisResult, myBaseCamp, entityManager);
-            IActionStrategy attackOpponentStrategy = new AttackOpponentBaseCampActionStrategy(threatAnalysisResult, myBaseCamp, entityManager);
-            for (int i = 0; i < heroesPerPlayer; i++)
+            try
             {
-                var hero = myHeroes[i];
-                IActionStrategy strategy;
+                Logger.LogDebug($"Start round: {GameState.RoundStates.Count + 1}");
+                inputs = gameInput.GetInput().Split(' ');
+                int myHealth = int.Parse(inputs[0]); // Your base health
+                int myMana = int.Parse(inputs[1]); // Ignore in the first league; Spend ten mana to cast a spell
+                myBaseCamp.UpdateHP(myHealth).UpdateMana(myMana);
 
-                if (hero.IsDefensiveHero)
-                {
-                    strategy = defensiveStrategy;
-                }
-                else if (hero.IsAttackOpponentBaseCamp)
-                {
-                    strategy = attackOpponentStrategy;
-                }
-                else
-                {
-                    strategy = offensiveStrategy;
-                }
 
-                hero.Action(strategy);
+                inputs = gameInput.GetInput().Split(' ');
+                int oppHealth = int.Parse(inputs[0]);
+                int oppMana = int.Parse(inputs[1]);
+                BaseCamp.OpponentBaseCamp.UpdateHP(oppHealth).UpdateMana(oppMana);
+
+                int entityCount = int.Parse(gameInput.GetInput()); // Amount of heros and monsters you can see
+                var entityManager = new EntityManager(entityCount, gameInput);
+                entityManager.Init(myBaseCamp);
+
+                List<Hero> myHeroes = entityManager.MyHeroes.OrderBy(x => x.DistanceToMyBase()).ToList();
+                List<Hero> oppHeroes = entityManager.OpponentHeroes;
+                List<Monster> monsters = entityManager.Monsters;
+                var threatAnalysisResult = threatAnalyzer.Analyze(myBaseCamp, entityManager);
+
+                GameState.NewRound(entityManager, threatAnalyzer);
+
+                IActionStrategy offensiveStrategy = new OffensiveActionStrategy(threatAnalysisResult, myBaseCamp, entityManager);
+                IActionStrategy defensiveStrategy = new ExtremeDefensiveActionStrategy(threatAnalysisResult, myBaseCamp, entityManager);
+                IActionStrategy defensePointStrategy = new DefensePointActionStrategy();
+                IActionStrategy attackOpponentStrategy = new AttackOpponentBaseCampActionStrategy(threatAnalysisResult, myBaseCamp, entityManager);
+                IActionStrategy attackPoint1Strategy = new AttackOpponentPointActionStrategy(Position.AttackPoint1, castControl: false);
+                IActionStrategy attackPoint2Strategy = new AttackOpponentPointActionStrategy(Position.AttackPoint2, castControl: true);
+
+
+
+                myHeroes[0].SetStrategy(defensePointStrategy);
+                myHeroes[1].SetStrategy(attackPoint1Strategy);
+                myHeroes[2].SetStrategy(attackPoint2Strategy);
+
+                for (int i = 0; i < heroesPerPlayer; i++)
+                {
+                    var hero = myHeroes[i];
+                    Logger.LogDebug($"{hero.ActionStrategy.GetType().Name} - {hero}");
+                    hero.Action();
+                }
+                Logger.LogDebug($"Completed Round {GameState.CurrentRoundState.Id}");
+            }
+            catch (Exception ex)
+            {
+                Logger.LogDebug($"ERROR: {ex.Message}");
             }
 
         }
@@ -106,6 +111,10 @@ public sealed class Constants
     public const int SpellControlRange = 2200;
     public const int SpellShieldRange = 2200;
 
+    // Monster 
+    public const int MonsterMaxMoving = 400;
+
+
 
 }
 
@@ -118,7 +127,9 @@ public class ConsoleInput : IGameInput
 {
     public string GetInput()
     {
-        return Console.ReadLine();
+        var input = Console.ReadLine();
+        Logger.LogDebug(input);
+        return input;
     }
 }
 
@@ -223,6 +234,47 @@ public class DefensiveActionStrategy : ThreatAnalysisActionStrategy
     }
 }
 
+public class ExtremeDefensiveActionStrategy : ThreatAnalysisActionStrategy
+{
+    public ExtremeDefensiveActionStrategy(ThreatAnalysisResult analysisResult, BaseCamp baseCamp, EntityManager entityManager) : base(analysisResult, baseCamp, entityManager)
+    {
+        HoldPosition = new Position(600, 600);
+        HoldPositionDistance = baseCamp.Location.CalculateDistance(HoldPosition);
+    }
+
+    public Position HoldPosition { get; }
+    public int HoldPositionDistance { get; }
+
+    public override void DoAction(Hero hero)
+    {
+        var target = AnalysisResult.ThreatCollection.FirstOrDefault();
+        Random random = new Random();
+        if (target != null && target.Monster.DistanceTo(hero) <= 800)
+        {
+            Logger.LogDebug($"Defense: {target}");
+            var enemies = entityManager.Monsters.Cast<Entity>().Concat(entityManager.OpponentHeroes);
+            if (hero.CanSpellWind(enemies) && target.Monster.DistanceToMyBaseCamp() <= Constants.DangerousDistance)
+            {
+                target.HandleThreat(_ => hero.SpellWind());
+            }
+            else
+            {
+                target.HandleThreat(hero.AttackMonster);
+            }
+
+            // Enough heroes go to next target
+            if (target.RequiredHeroes == target.NoOfHeroes)
+            {
+                AnalysisResult.ThreatCollection.Remove(target);
+            }
+        }
+        else
+        {
+            hero.Move(HoldPosition);
+        }
+    }
+}
+
 public class OffensiveActionStrategy : ThreatAnalysisActionStrategy
 {
     public OffensiveActionStrategy(ThreatAnalysisResult analysisResult, BaseCamp baseCamp, EntityManager entityManager) : base(analysisResult, baseCamp, entityManager)
@@ -231,18 +283,19 @@ public class OffensiveActionStrategy : ThreatAnalysisActionStrategy
 
     public override void DoAction(Hero hero)
     {
+        hero.IsDefensiveHero = true;
         var target = AnalysisResult.ThreatCollection.Where(x => x.RequiredHeroes > x.NoOfHeroes).FirstOrDefault();
         Random random = new Random();
         if (target != null)
         {
             Logger.LogDebug($"Offensive: {target}");
             var enemies = entityManager.Monsters.Cast<Entity>().Concat(entityManager.OpponentHeroes);
-            if (hero.CanSpellWind(enemies) && (baseCamp.Mana.Value > 50 || target.RequiredHeroes > 1))
+            if (hero.CanSpellWind(enemies) && (baseCamp.Mana.Value > 21 || target.RequiredHeroes > 1))
             {
                 hero.SpellWind();
                 target.HandleThreat(_ => { });
             }
-            else if (hero.CanSpellControl(entityManager.Monsters, out Entity enemy) 
+            else if (hero.CanSpellControl(entityManager.Monsters, out Entity enemy)
                 && (baseCamp.Mana.Value > 19 || target.RequiredHeroes > 1)
                 && enemy.DistanceToOpponentBaseCamp() > hero.DistanceToOpponentBaseCamp()
                 && enemy.IsControlled == 0)
@@ -307,13 +360,106 @@ public class AttackOpponentBaseCampActionStrategy : ThreatAnalysisActionStrategy
             }
             else
             {
-                
+
                 hero.MoveRandomlyFromCurrent(800, "Randomly");
             }
         }
     }
 }
 
+
+public class DoNothingActionStrategy : IActionStrategy
+{
+    public void DoAction(Hero hero)
+    {
+        hero.Wait();
+    }
+}
+
+public class DefensePointActionStrategy : IActionStrategy
+{
+    private const int BlowToOurBase = 1000;
+    public DefensePointActionStrategy()
+    {
+        DefensePosition = BaseCamp.MyBaseCamp.Location.Equals(Position.TopLeft) ? Position.DefensivePositionTop : Position.DefensivePositionBottom;
+    }
+
+    public Position DefensePosition { get; }
+
+    public void DoAction(Hero hero)
+    {
+        foreach (var monster in GameState.CurrentRoundState.Monsters.Where(x => x.NearBase == 1).OrderBy(x=>x.DistanceToMyBaseCamp()))
+        {
+            if (monster.DistanceToMyBase() < BlowToOurBase)
+            {
+                if (hero.CanSpellWind(new[] { monster }))
+                {
+                    hero.SpellWind(BaseCamp.OpponentBaseCamp.Location);
+                    return;
+                }
+            }
+            Logger.LogDebug($"Defense: {monster}");
+            hero.AttackMonster(monster);
+            return;
+        }
+        hero.Move(DefensePosition, "Move to defense");
+    }
+}
+
+public class AttackOpponentPointActionStrategy : IActionStrategy
+{
+    private Position attackPoint;
+    private const int BlowToEnemyBaseDistance = 7000;
+    private const int DefenseReserveMana = 30;
+
+    public bool CastControl { get; }
+
+    public AttackOpponentPointActionStrategy(Position attackPoint, bool castControl)
+    {
+        this.attackPoint = attackPoint; // BaseCamp.MyBaseCamp.Equals(Position.TopLeft) ? Position.AttackPoint1Top : Position.AttackPoint1Bottom;
+        CastControl = castControl;
+    }
+    public void DoAction(Hero hero)
+    {
+        var opponentHeroes = GameState.CurrentRoundState.OpponentHeroes.Where(x => x.DistanceToOpponentBaseCamp() > Constants.DefenseDistance);
+        if (CastControl && hero.CanSpellControl(opponentHeroes, out Entity target) && GameState.MyBaseCamp.Mana.Value > 0 && GameState.MyBaseCamp.Mana.Value % 10 == 0)
+        {
+            hero.SpellControl(target, BaseCamp.MyBaseCamp.Location);
+            return;
+        }
+        foreach (var monster in GameState.CurrentRoundState.Monsters)
+        {
+            var distanceToEnemyCamp = monster.DistanceToEnemyBase();
+
+            if (distanceToEnemyCamp <= Constants.DefenseDistance
+                && monster.ThreatFor == 2
+                && monster.ShieldLife == 0
+                && hero.CanSpellShield(new[] { monster }, out Entity shieldTarget) && GameState.MyBaseCamp.Mana.Value % 2 == 1 && GameState.MyBaseCamp.Mana.Value > 20)
+            {
+                hero.SpellShield(shieldTarget);
+                return;
+            }
+
+            if (distanceToEnemyCamp < BlowToEnemyBaseDistance)
+            {
+                if (hero.CanSpellWind(new[] { monster }) && GameState.MyBaseCamp.Mana.Value > DefenseReserveMana)
+                {
+                    hero.SpellWind(BaseCamp.OpponentBaseCamp.Location);
+                    return;
+                }
+
+                if (monster.IsOurThreat || GameState.MyBaseCamp.Mana.Value < DefenseReserveMana)
+                {
+                    hero.AttackMonster(monster);
+                    return;
+                }
+            }
+
+        }
+        hero.Move(attackPoint.X + Randomize.RandomRange(-100, 100), attackPoint.Y + Randomize.RandomRange(-100, 100), "Move to attack point");
+    }
+
+}
 #endregion
 
 #region Entities
@@ -365,10 +511,11 @@ public class EntityManager
 
                     break;
                 case TYPE_MY_HERO:
-                    MyHeroes.Add(
-                        new Hero(
+                    var hero = new Hero(
                             id, type, x, y, shieldLife, isControlled, health, vx, vy, nearBase, threatFor, baseCamp
-                        )
+                        );
+                    MyHeroes.Add(
+                        hero
                     );
                     break;
                 case TYPE_OP_HERO:
@@ -385,9 +532,6 @@ public class EntityManager
 
     }
 
-    public static bool IsOpponentHero(int type) => type == TYPE_OP_HERO;
-    public static bool IsMonster(int type) => type == TYPE_MONSTER;
-    public static bool IsMyHero(int type) => type == TYPE_MY_HERO;
 }
 
 public class Entity
@@ -422,11 +566,16 @@ public class Entity
         return this.CurrentPosition.CalculateDistance(nextTurn ? entity.NextPosition() : entity.CurrentPosition);
     }
 
+    public int DistanceToEnemyBase() => this.CurrentPosition.CalculateDistance(BaseCamp.OpponentBaseCamp.Location);
+    public int DistanceToMyBase() => this.CurrentPosition.CalculateDistance(BaseCamp.MyBaseCamp.Location);
+
 
     public Position NextPosition()
     {
         return new Position(this.CurrentPosition.X + SpeedVector.X, this.CurrentPosition.Y + SpeedVector.Y);
     }
+
+    public bool IsDead => Health <= 0;
 
     public override string ToString()
     {
@@ -447,16 +596,23 @@ public class Hero : Entity
     {
         BaseCamp = baseCamp;
         this.mana = baseCamp?.Mana;
+        ActionStrategy = new DoNothingActionStrategy();
     }
 
-    public void Action(IActionStrategy strategy)
+    public void Action()
     {
-        strategy.DoAction(this);
+        ActionStrategy.DoAction(this);
+    }
+
+    public void SetStrategy(IActionStrategy actionStrategy)
+    {
+        this.ActionStrategy = actionStrategy;
     }
 
     public bool IsDefensiveHero { get; set; }
 
     public bool IsAttackOpponentBaseCamp { get; set; }
+    public IActionStrategy ActionStrategy { get; private set; }
 
     public void AttackMonster(Monster monster)
     {
@@ -472,19 +628,19 @@ public class Hero : Entity
     public void Move(int x, int y, string comment = "")
     {
         CurrentPosition.UpdatePosition(x, y);
-        Console.WriteLine($"MOVE {x} {y} #{comment ?? "<comment>"}");
+        Console.WriteLine($"MOVE {x} {y} {comment}");
     }
 
-    public void MoveFromCurrentPosition(int x, int y, string comment = null)
+    public void MoveFromCurrentPosition(int x, int y, string comment = "")
     {
         var newX = CurrentPosition.X + x;
         var newY = CurrentPosition.Y + y;
         CurrentPosition.UpdatePosition(newX, newY);
-        Console.WriteLine($"MOVE {newX} {newY} #{comment ?? "n/a"}");
+        Console.WriteLine($"MOVE {newX} {newY} {comment}");
     }
 
 
-    public void MoveRandomlyFromCurrent(int maxDistance ,string comment = "")
+    public void MoveRandomlyFromCurrent(int maxDistance, string comment = "")
     {
         var random = new Random();
 
@@ -499,35 +655,44 @@ public class Hero : Entity
         mana.DecreaseMana(CastMana);
         int x = CurrentPosition.X + BaseCamp.OffensiveDirection(SpeedVector.X) > 0 ? CurrentPosition.X + BaseCamp.OffensiveDirection(1000) : 0;
         int y = CurrentPosition.Y + BaseCamp.OffensiveDirection(SpeedVector.X) > 0 ? CurrentPosition.Y + BaseCamp.OffensiveDirection(1000) : 0;
-        string spellCommand = $"SPELL WIND {x} {y}";
+        SpellWind(x, y);
+    }
+
+    public void SpellWind(Position position, string comment = "")
+    {
+        SpellWind(position.X, position.Y, comment);
+    }
+    public void SpellWind(int x, int y, string comment = "")
+    {
+        mana.DecreaseMana(CastMana);
+        string spellCommand = $"SPELL WIND {x} {y} {comment}";
         Console.WriteLine(spellCommand);
     }
 
-    public void SpellControl(Entity controlledEntity, Position newPosition)
+    public void SpellControl(Entity controlledEntity, Position newPosition, string comment = "")
     {
         controlledEntity.IsControlled = 1;
-        string spellCommand = $"SPELL CONTROL {controlledEntity.Id} {newPosition.X} {newPosition.Y}";
+        string spellCommand = $"SPELL CONTROL {controlledEntity.Id} {newPosition.X} {newPosition.Y} {comment}";
         Logger.LogDebug(spellCommand);
         Console.WriteLine(spellCommand);
     }
 
-    public void SpellShield(Entity protectedEntity)
+    public void SpellShield(Entity protectedEntity, string comment = "")
     {
-        string spellCommand = $"SPELL SHIELD {protectedEntity.Id}";
+        string spellCommand = $"SPELL SHIELD {protectedEntity.Id} {comment}";
         Logger.LogDebug(spellCommand);
         Console.WriteLine(spellCommand);
     }
 
-    public void Move(Position pos, string comment = null)
+    public void Move(Position pos, string comment = "")
     {
         Move(pos.X, pos.Y, comment);
     }
 
     public bool CanSpellWind(IEnumerable<Entity> enemies)
     {
-        int nearbyMonsters = FindNearByEnemies(enemies, Constants.SpellWindRange).Count();
+        int nearbyMonsters = FindNearByEnemies(enemies, Constants.SpellWindRange).Where(x => x.ShieldLife == 0).Count();
 
-        Logger.LogDebug($"Current Position: {CurrentPosition} - Next: {SpeedVector}");
         if (mana.Value >= CastMana && nearbyMonsters > 0)
         {
             return true;
@@ -543,7 +708,7 @@ public class Hero : Entity
 
     public bool CanSpellControl(IEnumerable<Entity> enemies, out Entity enemy)
     {
-        enemy = FindNearByEnemies(enemies, Constants.SpellWindRange).FirstOrDefault();
+        enemy = FindNearByEnemies(enemies, Constants.SpellControlRange).Where(x=>x.ShieldLife == 0).FirstOrDefault();
 
         if (mana.Value >= CastMana && enemy != null)
         {
@@ -553,6 +718,17 @@ public class Hero : Entity
         return false;
     }
 
+    public bool CanSpellShield(IEnumerable<Entity> enemies, out Entity enemy)
+    {
+        enemy = FindNearByEnemies(enemies, Constants.SpellShieldRange).FirstOrDefault();
+
+        if (mana.Value >= CastMana && enemy != null)
+        {
+            return true;
+        }
+
+        return false;
+    }
 }
 
 
@@ -565,7 +741,9 @@ public class Monster : Entity
 
     }
 
-    public bool IsOurThreat => this.ThreatFor == 1;
+    public bool IsOurThreat => this.ThreatFor == 1 || (CurrentPosition.CalculateDistance(BaseCamp.MyBaseCamp.Location) > NextPosition().CalculateDistance(BaseCamp.MyBaseCamp.Location));
+    public bool CanSpell => ShieldLife == 0;
+
 }
 
 #endregion
@@ -739,7 +917,6 @@ public class BaseCamp
             newValue = value * (-1);
         }
 
-        Logger.LogDebug($"New value: {newValue}");
         return newValue;
     }
 
@@ -868,7 +1045,18 @@ public class Position : IEquatable<Position>
     public static Position TopLeft => new Position(0, 0);
     public static Position BottomRight => new Position(17630, 9000);
 
+    public static Position DefensivePositionTop => new Position(1900, 1600);
+    public static Position DefensivePositionBottom => new Position(16000, 7000);
 
+    public static Position AttackPoint1Top => new Position(16000, 3000);
+    public static Position AttackPoint1Bottom => new Position(2000, 6000);
+
+    public static Position AttackPoint2Top => new Position(11000, 7000);
+    public static Position AttackPoint2Bottom => new Position(6000, 1000);
+
+
+    public static Position AttackPoint1 => BaseCamp.MyBaseCamp.Location.Equals(Position.TopLeft) ? Position.AttackPoint1Top : Position.AttackPoint1Bottom;
+    public static Position AttackPoint2 => BaseCamp.MyBaseCamp.Location.Equals(Position.TopLeft) ? Position.AttackPoint2Top : Position.AttackPoint2Bottom;
 }
 #endregion
 
@@ -892,5 +1080,62 @@ public static class EntityExtenstions
         return entity.CurrentPosition.CalculateDistance(BaseCamp.OpponentBaseCamp.Location);
     }
 }
+
+public static class Randomize
+{
+    private static Random random;
+
+    static Randomize()
+    {
+        random = new Random();
+    }
+
+    public static int RandomRange(int min, int max)
+    {
+        return random.Next(min, max);
+    }
+}
+
+#endregion
+
+#region Action Optimizer
+
+public static class GameState
+{
+    public static Stack<RoundState> RoundStates { get; } = new Stack<RoundState>();
+
+    public static BaseCamp MyBaseCamp { get; set; }
+    public static BaseCamp OpponentBaseCamp { get; set; }
+
+    public static RoundState CurrentRoundState => RoundStates.Peek();
+
+    public static RoundState NewRound(EntityManager entityManager, IThreatAnalyzer threatAnalyzer)
+    {
+        var roundState = new RoundState(RoundStates.Count + 1, entityManager, threatAnalyzer);
+        RoundStates.Push(roundState);
+        return roundState;
+    }
+
+    public class RoundState
+    {
+        internal RoundState(int id, EntityManager entityManager, IThreatAnalyzer threatAnalyzer)
+        {
+            Id = id;
+            EntityManager = entityManager;
+            ThreatAnalyzer = threatAnalyzer;
+        }
+        public int Id { get; }
+
+        protected EntityManager EntityManager { get; }
+
+        protected IThreatAnalyzer ThreatAnalyzer { get; }
+
+        public IEnumerable<Monster> Monsters => EntityManager.Monsters;
+        public IEnumerable<Hero> OpponentHeroes => EntityManager.OpponentHeroes;
+    }
+}
+
+
+
 
 #endregion
