@@ -69,11 +69,23 @@ class Player
                 IActionStrategy attackPoint1Strategy = new AttackOpponentPointActionStrategy(Position.AttackPoint3, castControl: false);
                 IActionStrategy attackPoint2Strategy = new AttackOpponentPointActionStrategy(Position.AttackPoint3, castControl: true);
 
-
-
-                myHeroes[0].SetStrategy(defensePointStrategy);
-                myHeroes[1].SetStrategy(attackPoint1Strategy);
-                myHeroes[2].SetStrategy(attackPoint2Strategy);
+                var defenseHeroCount = 1;
+                if (myBaseCamp.HP < BaseCamp.OpponentBaseCamp.HP)
+                {
+                    defenseHeroCount = 1;
+                }
+                foreach (var hero in myHeroes)
+                {
+                    if (defenseHeroCount == 0)
+                    {
+                        hero.SetStrategy(attackPoint2Strategy);
+                    }
+                    else
+                    {
+                        hero.SetStrategy(defensePointStrategy);
+                        defenseHeroCount--;
+                    }
+                }
 
                 for (int i = 0; i < heroesPerPlayer; i++)
                 {
@@ -390,7 +402,19 @@ public class DefensePointActionStrategy : IActionStrategy
 
     public void DoAction(Hero hero)
     {
-        foreach (var monster in GameState.CurrentRoundState.Monsters.Where(x => x.NearBase == 1).OrderBy(x=>x.DistanceToMyBaseCamp()))
+        if (hero.ShieldLife == 0 && Randomize.RandomRange(1, 20) % 2 == 0 && hero.CanSpellShield(new[] {hero}, out Entity targetHero))
+        {
+            hero.SpellShield(targetHero);
+            return;
+        }
+        IOrderedEnumerable<Monster> nearMyCampMonsters = GameState.CurrentRoundState.Monsters.Where(x => x.NearBase == 1 && x.DistanceToMyBase() < Constants.DefenseDistance).OrderBy(x => x.DistanceToMyBase());
+
+        if (hero.CanSpellWind(GameState.CurrentRoundState.OpponentHeroes) && nearMyCampMonsters.Count() > 0)
+        {
+            hero.SpellWind(BaseCamp.OpponentBaseCamp.Location);
+            return;
+        }
+        foreach (var monster in nearMyCampMonsters)
         {
             if (monster.DistanceToMyBase() < BlowToOurBase)
             {
@@ -398,12 +422,23 @@ public class DefensePointActionStrategy : IActionStrategy
                 {
                     hero.SpellWind(BaseCamp.OpponentBaseCamp.Location);
                     return;
+                } 
+                else if (hero.CanSpellControl(new[] {monster}, out Entity target ) )
+                {
+                    hero.SpellControl(target, BaseCamp.OpponentBaseCamp.Location);
+                    return;
                 }
             }
-            Logger.LogDebug($"Defense: {monster}");
-            hero.AttackMonster(monster);
-            return;
+            else
+            {
+                Logger.LogDebug($"Defense: {monster}");
+                hero.AttackMonster(monster);
+                return;
+            }
         }
+        
+
+
         hero.Move(DefensePosition, "Move to defense");
     }
 }
@@ -420,17 +455,20 @@ public class AttackOpponentPointActionStrategy : IActionStrategy
     {
         this.attackPoint = attackPoint; // BaseCamp.MyBaseCamp.Equals(Position.TopLeft) ? Position.AttackPoint1Top : Position.AttackPoint1Bottom;
         CastControl = castControl;
-        if (GameState.CurrentRoundState.OpponentHeroes.All(x => x.DistanceToEnemyBase() > Constants.DefenseDistance && x.DistanceToEnemyBase() > attackPoint.CalculateDistance(BaseCamp.OpponentBaseCamp.Location)))
-        {
-            this.attackPoint = attackPoint.Move(-BaseCamp.MyBaseCamp.OffensiveDirection(Randomize.RandomRange(100, 1000)), -BaseCamp.MyBaseCamp.OffensiveDirection(Randomize.RandomRange(100, 1000)));
-        }
+        
     }
     public void DoAction(Hero hero)
     {
-        var opponentHeroes = GameState.CurrentRoundState.OpponentHeroes.Where(x => x.DistanceToOpponentBaseCamp() < Constants.DefenseDistance);
-        if (CastControl && hero.CanSpellControl(opponentHeroes, out Entity target) && GameState.MyBaseCamp.Mana.Value > 0 && GameState.MyBaseCamp.Mana.Value % 6 == 0)
+        if (GameState.CurrentRoundState.OpponentHeroes.All(x => x.DistanceToEnemyBase() > hero.DistanceToEnemyBase()) && hero.DistanceToEnemyBase() < 8000)
         {
-            hero.SpellControl(target, BaseCamp.MyBaseCamp.Location);
+            this.attackPoint = hero.CurrentPosition.Move(-BaseCamp.MyBaseCamp.OffensiveDirection(Randomize.RandomRange(400, 1000)), -BaseCamp.MyBaseCamp.OffensiveDirection(Randomize.RandomRange(400, 1000)));
+            Logger.LogDebug($"Update attack Point: {attackPoint}");
+        }
+
+        var opponentHeroes = GameState.CurrentRoundState.OpponentHeroes.Where(x => x.DistanceToOpponentBaseCamp() < Constants.DefenseDistance);
+        if (CastControl && hero.CanSpellWind(opponentHeroes) && GameState.MyBaseCamp.Mana.Value > 0 && Randomize.RandomRange(1, 5) == 5)
+        {
+            hero.SpellWind(BaseCamp.MyBaseCamp.Location);
             return;
         }
         foreach (var monster in GameState.CurrentRoundState.Monsters)
@@ -456,20 +494,19 @@ public class AttackOpponentPointActionStrategy : IActionStrategy
                     return;
                 }
 
-                if (GameState.MyBaseCamp.Mana.Value > DefenseReserveMana && hero.CanSpellControl(new[] { monster}, out target))
+                if (GameState.MyBaseCamp.Mana.Value > DefenseReserveMana && hero.CanSpellControl(new[] { monster }, out Entity target))
                 {
                     hero.SpellControl(target, BaseCamp.OpponentBaseCamp.Location);
                     return;
                 }
 
-                if ((monster.IsOurThreat  || (GameState.MyBaseCamp.Mana.Value < DefenseReserveMana && distanceToEnemyCamp > 2500)) && monster.ShieldLife == 0 && monster.IsControlled == 0)
+                if ((monster.IsOurThreat || (GameState.MyBaseCamp.Mana.Value < DefenseReserveMana && distanceToEnemyCamp > 2500)) && monster.ShieldLife == 0 && monster.IsControlled == 0)
                 {
                     hero.AttackMonster(monster);
                     return;
                 }
-
-                
             }
+
 
         }
         hero.Move(attackPoint.X + Randomize.RandomRange(-100, 100), attackPoint.Y + Randomize.RandomRange(-100, 100), "Move to attack point");
